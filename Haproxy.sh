@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -euo pipefail  # Enable strict error handling
-
 CONFIG_FILE="/etc/haproxy/haproxy.cfg"
 RULES_FILE="/etc/haproxy/forward_rules.conf"
 BACKUP_DIR="/etc/haproxy/backups"
@@ -12,7 +10,11 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Helper function for input validation
+# Helper Functions
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
 validate_port() {
     local port=$1
     if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
@@ -22,24 +24,16 @@ validate_port() {
     return 0
 }
 
-validate_ip() {
-    local ip=$1
-    if ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "Invalid IP address format: $ip" >&2
-        return 1
-    fi
-    return 0
-}
-
-# Installation and initialization
+# Installation
 install_haproxy() {
-    if ! command -v haproxy &>/dev/null; then
+    if ! command_exists haproxy; then
         echo "Installing HAProxy..."
         apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy
         mkdir -p "$BACKUP_DIR"
     fi
 }
 
+# Initialize Configuration
 initialize_files() {
     local default_config=$(cat <<'EOF'
 global
@@ -72,33 +66,103 @@ defaults
     timeout check   5000ms
 EOF
 )
-
     [ ! -f "$CONFIG_FILE" ] && echo "$default_config" > "$CONFIG_FILE"
     [ ! -f "$RULES_FILE" ] && touch "$RULES_FILE"
     chmod 600 "$CONFIG_FILE" "$RULES_FILE"
 }
 
-# Configuration management
+# Status Function
+check_status() {
+    echo -e "\n=== HAProxy Status Check ===\n"
+    
+    if ! command_exists haproxy; then
+        echo "❌ HAProxy is not installed"
+        return 1
+    fi
+
+    if systemctl is-active --quiet haproxy; then
+        echo "✓ HAProxy Service: Running"
+        
+        local pid=$(pgrep haproxy | head -n 1)
+        if [[ -n "$pid" ]]; then
+            echo -e "\n-- Process Information --"
+            ps -p "$pid" -o pid,ppid,user,%cpu,%mem,start,time,cmd | head -n 1
+            ps -p "$pid" -o pid,ppid,user,%cpu,%mem,start,time,cmd | tail -n 1
+        fi
+
+        if command_exists netstat; then
+            echo -e "\n-- Active Port Bindings --"
+            netstat -tlnp 2>/dev/null | grep haproxy | awk '{print $4}' | sort -n | \
+                while read -r port; do
+                    echo "Listening on: $port"
+                done
+        fi
+
+        echo -e "\n-- Memory Usage --"
+        free -h | grep -E "^Mem|^Swap" | awk '{print $1 ": " $3 " used of " $2}'
+
+        echo -e "\n-- Version Information --"
+        haproxy -v | head -n 1
+
+        echo -e "\n-- Configuration Check --"
+        if haproxy -c -f "$CONFIG_FILE" >/dev/null 2>&1; then
+            echo "✓ Configuration syntax is valid"
+            echo "✓ Current rules in use: $(wc -l < "$RULES_FILE")"
+        else
+            echo "❌ Configuration has errors"
+        fi
+        
+        echo -e "\n-- Current Connections --"
+        if [ -S /run/haproxy/admin.sock ]; then
+            echo "show stat" | socat unix-connect:/run/haproxy/admin.sock stdio 2>/dev/null | \
+            cut -d',' -f1,2,5,18 | column -s, -t
+        else
+            echo "Stats socket not available"
+        fi
+    else
+        echo "❌ HAProxy Service: Stopped"
+    fi
+    
+    echo -e "\n==========================="
+}
+
+# Service Management
+manage_service() {
+    local action=$1
+    echo -e "\nExecuting: $action HAProxy..."
+    
+    systemctl "$action" haproxy
+    
+    if [ $? -eq 0 ]; then
+        echo "Operation successful!"
+        systemctl status haproxy --no-pager
+    else
+        echo "Operation failed!" >&2
+        return 1
+    fi
+}
+
+# Configuration Management
 generate_config() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
     cp "$CONFIG_FILE" "${BACKUP_DIR}/haproxy_${timestamp}.cfg"
 
     {
         cat "$CONFIG_FILE" | grep -E '^(global|defaults|$)'
-        while IFS=':' read -r frontend backend_ip backend_port; do
-            [ -z "$frontend" ] && continue
+        while IFS=: read -r port address backend status; do
+            [ -z "$port" ] && continue
             cat <<EOF
 
-frontend front_${frontend}
-    bind :::${frontend} v4v6
+frontend front_${port}
+    bind *:${port}
     mode tcp
-    default_backend back_${frontend}
+    default_backend back_${port}
 
-backend back_${frontend}
+backend back_${port}
     mode tcp
     balance roundrobin
     option tcp-check
-    server server_${frontend} ${backend_ip}:${backend_port} check inter 2000 rise 2 fall 3
+    server server_${port} ${address:-127.0.0.1}:${backend:-80} check inter 2000 rise 2 fall 3
 EOF
         done < "$RULES_FILE"
     } > "${CONFIG_FILE}.new"
@@ -113,55 +177,53 @@ EOF
     fi
 }
 
-restart_haproxy() {
-    echo "Restarting HAProxy..."
-    systemctl restart haproxy || {
-        echo "Failed to restart HAProxy!" >&2
-        return 1
-    }
-    systemctl status haproxy --no-pager
-}
-
-# Rule management functions
+# Rule Management
 view_rules() {
     echo -e "\n=== Current Forwarding Rules ==="
     if [ ! -s "$RULES_FILE" ]; then
         echo "No rules configured."
     else
-        awk -F':' '
-            BEGIN {printf "%-4s %-15s %-15s %-8s\n", "No.", "Front Port", "Back IP", "Back Port"}
-            {printf "%-4d %-15s %-15s %-8s\n", NR, $1, $2, $3}
-        ' "$RULES_FILE"
+        # Header
+        printf "%-4s %-8s %-15s %-15s %-10s\n" "No." "Port" "Local Address" "Backend" "Status"
+        printf "%s\n" "------------------------------------------------"
+        
+        # Read and display each rule
+        local n=0
+        while IFS=: read -r port address backend status; do
+            [ -z "$port" ] && continue
+            status=${status:-unknown}
+            printf "%-4d %-8s %-15s %-15s %-10s\n" "$((++n))" \
+                "$port" \
+                "${address:-unknown}" \
+                "${backend:-unknown}" \
+                "$status"
+        done < "$RULES_FILE"
     fi
     echo "=============================="
 }
 
 add_rule() {
-    local frontend_port backend_ip backend_port
+    local port address backend
 
     while true; do
-        read -rp "Frontend port: " frontend_port
-        validate_port "$frontend_port" && break
+        read -rp "Port: " port
+        validate_port "$port" && break
     done
 
-    while true; do
-        read -rp "Backend IP: " backend_ip
-        validate_ip "$backend_ip" && break
-    done
+    read -rp "Local Address [press Enter for default]: " address
+    address=${address:-unknown}
 
-    while true; do
-        read -rp "Backend port: " backend_port
-        validate_port "$backend_port" && break
-    done
+    read -rp "Backend [press Enter for default]: " backend
+    backend=${backend:-unknown}
 
-    # Check for duplicate frontend port
-    if grep -q "^${frontend_port}:" "$RULES_FILE"; then
-        echo "Error: Frontend port $frontend_port already exists" >&2
+    if grep -q "^${port}:" "$RULES_FILE"; then
+        echo "Error: Port $port already exists" >&2
         return 1
     fi
 
-    echo "${frontend_port}:${backend_ip}:${backend_port}" >> "$RULES_FILE"
-    generate_config && restart_haproxy
+    echo "${port}:${address}:${backend}:unknown" >> "$RULES_FILE"
+    echo "Rule added successfully."
+    generate_config && manage_service restart
 }
 
 delete_rule() {
@@ -171,7 +233,7 @@ delete_rule() {
 
     if [[ "$rule_number" =~ ^[0-9]+$ ]] && [ -n "$(sed -n "${rule_number}p" "$RULES_FILE")" ]; then
         sed -i "${rule_number}d" "$RULES_FILE"
-        generate_config && restart_haproxy
+        generate_config && manage_service restart
         echo "Rule deleted successfully."
     else
         echo "Invalid rule number." >&2
@@ -179,62 +241,7 @@ delete_rule() {
     fi
 }
 
-# Service management functions
-check_status() {
-    echo -e "\n=== HAProxy Status ==="
-    if systemctl is-active haproxy >/dev/null 2>&1; then
-        echo "Status: Running ✓"
-        echo -e "\nProcess Information:"
-        ps aux | grep -v grep | grep haproxy
-
-        echo -e "\nPort Bindings:"
-        netstat -tulpn 2>/dev/null | grep haproxy
-
-        echo -e "\nCurrent Connections:"
-        echo "show stat" | socat unix-connect:/run/haproxy/admin.sock stdio 2>/dev/null | cut -d ',' -f 1,2,5,7,8 | column -s, -t || echo "Unable to get connection stats"
-
-        echo -e "\nSystem Resources:"
-        top -b -n 1 | grep haproxy || echo "No resource usage data available"
-
-        echo -e "\nLast 5 Log Entries:"
-        journalctl -u haproxy -n 5 --no-pager
-    else
-        echo "Status: Stopped ✗"
-        echo "HAProxy is not running!"
-    fi
-    echo "======================="
-}
-
-manage_service() {
-    local action=$1
-    echo -e "\nExecuting: $action HAProxy..."
-    
-    case $action in
-        "restart")
-            systemctl restart haproxy
-            ;;
-        "start")
-            systemctl start haproxy
-            ;;
-        "stop")
-            systemctl stop haproxy
-            ;;
-        *)
-            echo "Invalid action!" >&2
-            return 1
-            ;;
-    esac
-
-    if [ $? -eq 0 ]; then
-        echo "Operation successful!"
-        systemctl status haproxy --no-pager
-    else
-        echo "Operation failed!" >&2
-        return 1
-    fi
-}
-
-# Main menu function
+# Main Menu
 main_menu() {
     while true; do
         echo -e "\n=== HAProxy Management ==="
@@ -254,7 +261,7 @@ main_menu() {
             3) delete_rule ;;
             4) 
                 read -rp "Clear all rules? [y/N]: " confirm
-                [[ "${confirm,,}" == "y" ]] && : > "$RULES_FILE" && generate_config && restart_haproxy
+                [[ "${confirm,,}" == "y" ]] && : > "$RULES_FILE" && generate_config && manage_service restart
                 ;;
             5) check_status ;;
             6)
@@ -266,9 +273,9 @@ main_menu() {
                 
                 read -rp "Select option: " service_option
                 case $service_option in
-                    1) manage_service "start" ;;
-                    2) manage_service "stop" ;;
-                    3) manage_service "restart" ;;
+                    1) manage_service start ;;
+                    2) manage_service stop ;;
+                    3) manage_service restart ;;
                     4) continue ;;
                     *) echo "Invalid option!" ;;
                 esac
@@ -279,7 +286,7 @@ main_menu() {
     done
 }
 
-# Main script execution
+# Main Script Execution
 {
     install_haproxy
     initialize_files
