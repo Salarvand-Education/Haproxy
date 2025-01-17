@@ -1,183 +1,115 @@
 #!/bin/bash
 
+set -euo pipefail  # Enable strict error handling
+
 CONFIG_FILE="/etc/haproxy/haproxy.cfg"
 RULES_FILE="/etc/haproxy/forward_rules.conf"
+BACKUP_DIR="/etc/haproxy/backups"
 
-# نصب HAProxy در صورت عدم وجود
-install_haproxy() {
-    if ! command -v haproxy &>/dev/null; then
-        echo "HAProxy not found. Installing..."
-        apt update && apt install -y haproxy
-        echo "HAProxy installed successfully."
-    fi
-}
+# Previous functions remain the same until main_menu...
 
-# ایجاد فایل‌های مورد نیاز در صورت عدم وجود
-initialize_files() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "Creating $CONFIG_FILE..."
-        cat >"$CONFIG_FILE" <<EOF
-global
-    log /dev/log local0
-    log /dev/log local1 notice
-    chroot /var/lib/haproxy
-    stats timeout 30s
-    user haproxy
-    group haproxy
-    daemon
-    ca-base /etc/ssl/certs
-    crt-base /etc/ssl/private
-    ssl-default-bind-options no-sslv3
-    ssl-default-bind-ciphers HIGH:!aNULL:!MD5
+# New function for detailed status
+check_status() {
+    echo -e "\n=== HAProxy Status ==="
+    if systemctl is-active haproxy >/dev/null 2>&1; then
+        echo "Status: Running ✓"
+        echo -e "\nProcess Information:"
+        ps aux | grep -v grep | grep haproxy
 
-defaults
-    log     global
-    option  tcplog
-    option  dontlognull
-    timeout connect 5000ms
-    timeout client  50000ms
-    timeout server  50000ms
-EOF
-    fi
+        echo -e "\nPort Bindings:"
+        netstat -tulpn 2>/dev/null | grep haproxy
 
-    if [ ! -f "$RULES_FILE" ]; then
-        echo "Creating $RULES_FILE..."
-        touch "$RULES_FILE"
-    fi
-}
+        echo -e "\nCurrent Connections:"
+        echo "show stat" | socat unix-connect:/run/haproxy/admin.sock stdio 2>/dev/null | cut -d ',' -f 1,2,5,7,8 | column -s, -t || echo "Unable to get connection stats"
 
-# نمایش قوانین موجود
-view_rules() {
-    echo "======================="
-    echo " Forwarding Rules"
-    echo "======================="
-    if [ ! -s "$RULES_FILE" ]; then
-        echo "No rules found."
+        echo -e "\nSystem Resources:"
+        top -b -n 1 | grep haproxy || echo "No resource usage data available"
+
+        echo -e "\nLast 5 Log Entries:"
+        journalctl -u haproxy -n 5 --no-pager
     else
-        awk -F':' '{print NR " | Frontend Port: " $1 " | Backend: " $2 ":" $3}' "$RULES_FILE"
+        echo "Status: Stopped ✗"
+        echo "HAProxy is not running!"
     fi
     echo "======================="
 }
 
-# افزودن قانون جدید
-add_rule() {
-    echo "Enter frontend port:"
-    read -r frontend_port
-    echo "Enter backend IP:"
-    read -r backend_ip
-    echo "Enter backend port:"
-    read -r backend_port
+# Modified restart function with more options
+manage_service() {
+    local action=$1
+    echo -e "\nExecuting: $action HAProxy..."
+    
+    case $action in
+        "restart")
+            systemctl restart haproxy
+            ;;
+        "start")
+            systemctl start haproxy
+            ;;
+        "stop")
+            systemctl stop haproxy
+            ;;
+        *)
+            echo "Invalid action!" >&2
+            return 1
+            ;;
+    esac
 
-    echo "$frontend_port:$backend_ip:$backend_port" >>"$RULES_FILE"
-    echo "Rule added: $frontend_port -> $backend_ip:$backend_port"
-    restart_haproxy
-}
-
-# حذف قانون
-delete_rule() {
-    view_rules
-    echo "Enter the rule number to delete:"
-    read -r rule_number
-
-    if sed -i "${rule_number}d" "$RULES_FILE"; then
-        echo "Rule deleted successfully."
-        restart_haproxy
+    if [ $? -eq 0 ]; then
+        echo "Operation successful!"
+        systemctl status haproxy --no-pager
     else
-        echo "Failed to delete rule. Check the rule number and try again."
+        echo "Operation failed!" >&2
+        return 1
     fi
 }
 
-# پاکسازی تمام قوانین
-clear_rules() {
-    echo "Are you sure you want to delete all rules? (yes/no)"
-    read -r confirm
-    if [ "$confirm" == "yes" ]; then
-        sudo >"$RULES_FILE"
-        generate_config
-        echo "All rules deleted and configuration reset."
-        restart_haproxy
-    else
-        echo "Operation canceled."
-    fi
+# Modified main menu with new options
+main_menu() {
+    while true; do
+        echo -e "\n=== HAProxy Management ==="
+        echo "1. View rules"
+        echo "2. Add rule"
+        echo "3. Delete rule"
+        echo "4. Clear all rules"
+        echo "5. Service status"
+        echo "6. Service control"
+        echo "7. Exit"
+        echo "======================="
+        
+        read -rp "Select option: " option
+        case $option in
+            1) view_rules ;;
+            2) add_rule ;;
+            3) delete_rule ;;
+            4) 
+                read -rp "Clear all rules? [y/N]: " confirm
+                [[ "${confirm,,}" == "y" ]] && : > "$RULES_FILE" && generate_config && restart_haproxy
+                ;;
+            5) check_status ;;
+            6)
+                echo -e "\nService Control Options:"
+                echo "1. Start HAProxy"
+                echo "2. Stop HAProxy"
+                echo "3. Restart HAProxy"
+                echo "4. Back to main menu"
+                
+                read -rp "Select option: " service_option
+                case $service_option in
+                    1) manage_service "start" ;;
+                    2) manage_service "stop" ;;
+                    3) manage_service "restart" ;;
+                    4) continue ;;
+                    *) echo "Invalid option!" ;;
+                esac
+                ;;
+            7) exit 0 ;;
+            *) echo "Invalid option!" ;;
+        esac
+    done
 }
 
-# تولید پیکربندی HAProxy
-generate_config() {
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
-    cat >"$CONFIG_FILE" <<EOF
-global
-    log /dev/log local0
-    log /dev/log local1 notice
-    chroot /var/lib/haproxy
-    stats timeout 30s
-    user haproxy
-    group haproxy
-    daemon
-    ca-base /etc/ssl/certs
-    crt-base /etc/ssl/private
-    ssl-default-bind-options no-sslv3
-    ssl-default-bind-ciphers HIGH:!aNULL:!MD5
-
-defaults
-    log     global
-    option  tcplog
-    option  dontlognull
-    timeout connect 5000ms
-    timeout client  50000ms
-    timeout server  50000ms
-EOF
-
-    while IFS=':' read -r frontend backend_ip backend_port; do
-        cat >>"$CONFIG_FILE" <<EOF
-
-frontend frontend_$frontend
-    bind :::$frontend
-    mode tcp
-    default_backend backend_$frontend
-
-backend backend_$frontend
-    mode tcp
-    server server_$frontend $backend_ip:$backend_port check
-EOF
-    done <"$RULES_FILE"
-
-    echo "Configuration file generated and updated."
-}
-
-# ری‌استارت HAProxy
-restart_haproxy() {
-    generate_config
-    echo "Restarting HAProxy..."
-    if systemctl restart haproxy; then
-        echo "HAProxy restarted successfully."
-    else
-        echo "Failed to restart HAProxy. Check the configuration."
-    fi
-}
-
-# منوی اصلی
+# Script initialization
 install_haproxy
 initialize_files
-
-while true; do
-    echo "======================="
-    echo " HAProxy Management"
-    echo "======================="
-    echo "1. View rules"
-    echo "2. Add forwarding rule"
-    echo "3. Delete forwarding rule"
-    echo "4. Clear all rules"
-    echo "5. Exit"
-    echo "======================="
-    echo "Select an option:"
-    read -r option
-
-    case $option in
-    1) view_rules ;;
-    2) add_rule ;;
-    3) delete_rule ;;
-    4) clear_rules ;;
-    5) exit ;;
-    *) echo "Invalid option. Please try again." ;;
-    esac
-done
+main_menu
