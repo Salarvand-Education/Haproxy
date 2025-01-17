@@ -1,5 +1,6 @@
 #!/bin/bash
 
+clear
 CONFIG_FILE="/etc/haproxy/haproxy.cfg"
 RULES_FILE="/etc/haproxy/forward_rules.conf"
 
