@@ -206,7 +206,7 @@ while true; do
     echo -e "   ${YELLOW}2)${NC} Add a forwarding rule"
     echo -e "   ${YELLOW}3)${NC} Delete a forwarding rule"
     echo -e "   ${YELLOW}4)${NC} Clear all forwarding rules"
-    echo -e "   ${YELLOW}5)${NC} Exit"
+    echo -e "   ${RED}0)${NC} Exit"
     echo -e "${BLUE}========================================${NC}"
     read -p "Select an option: " option
 
@@ -215,9 +215,9 @@ while true; do
         2) add_rule ;;
         3) delete_rule ;;
         4) clear_rules ;;
-        5) 
+        0) 
             echo -e "${GREEN}Exiting HAProxy management tool. Goodbye!${NC}"
-            break ;;
+            exit 0 ;; # Exit with success code
         *) echo -e "${RED}Invalid option. Please select a valid option from the menu.${NC}" ;;
     esac
 done
