@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # ANSI Color Codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,6 +24,7 @@ install_haproxy() {
     else
         echo -e "${GREEN}HAProxy is already installed.${NC}"
     fi
+    clear_screen
 }
 
 # Initialize necessary files
@@ -45,7 +45,6 @@ global
     crt-base /etc/ssl/private
     ssl-default-bind-options no-sslv3
     ssl-default-bind-ciphers HIGH:!aNULL:!MD5
-
 defaults
     log     global
     option  tcplog
@@ -55,7 +54,6 @@ defaults
     timeout server  50000ms
 EOF
     fi
-
     # Create rules file if it doesn't exist
     [[ ! -f "$RULES_FILE" ]] && touch "$RULES_FILE"
 }
@@ -82,6 +80,8 @@ view_rules() {
         done
     fi
     echo -e "${BLUE}================================================================================${NC}"
+    sleep 7
+    clear_screen
 }
 
 # Add a new rule
@@ -89,38 +89,35 @@ add_rule() {
     read -p "Enter frontend port: " frontend_port
     read -p "Enter backend IP (IPv4, IPv6, or 6to4): " backend_ip
     read -p "Enter backend port: " backend_port
-
     if [[ -z "$frontend_port" || -z "$backend_ip" || -z "$backend_port" ]]; then
         echo -e "${RED}All fields are required. Please try again.${NC}"
         return 1
     fi
-
     # Wrap IPv6 or 6to4 addresses in brackets
     if [[ "$backend_ip" == *":"* ]]; then
         backend_ip="[$backend_ip]"
     fi
-
     echo "$frontend_port:$backend_ip:$backend_port" >>"$RULES_FILE"
     echo -e "${GREEN}Rule added: Frontend Port $frontend_port -> Backend $backend_ip:$backend_port${NC}"
     restart_haproxy
+    clear_screen
 }
 
 # Delete a rule
 delete_rule() {
     view_rules
     read -p "Enter the rule number to delete: " rule_number
-
     if [[ ! "$rule_number" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}Invalid rule number. Please enter a valid number.${NC}"
         return 1
     fi
-
     if sed -i "${rule_number}d" "$RULES_FILE"; then
         echo -e "${GREEN}Rule deleted successfully.${NC}"
         restart_haproxy
     else
         echo -e "${RED}Failed to delete rule. Check the rule number and try again.${NC}"
     fi
+    clear_screen
 }
 
 # Clear all rules
@@ -134,6 +131,7 @@ clear_rules() {
     else
         echo -e "${YELLOW}Operation canceled.${NC}"
     fi
+    clear_screen
 }
 
 # Generate HAProxy configuration
@@ -152,7 +150,6 @@ global
     crt-base /etc/ssl/private
     ssl-default-bind-options no-sslv3
     ssl-default-bind-ciphers HIGH:!aNULL:!MD5
-
 defaults
     log     global
     option  tcplog
@@ -161,25 +158,21 @@ defaults
     timeout client  50000ms
     timeout server  50000ms
 EOF
-
     while IFS=':' read -r frontend backend_ip backend_port; do
         # Wrap IPv6 or 6to4 addresses in brackets for HAProxy
         if [[ "$backend_ip" == *":"* ]]; then
             backend_ip="[$backend_ip]"
         fi
         cat >>"$CONFIG_FILE" <<EOF
-
 frontend frontend_$frontend
     bind :::$frontend
     mode tcp
     default_backend backend_$frontend
-
 backend backend_$frontend
     mode tcp
     server server_$frontend $backend_ip:$backend_port check
 EOF
     done <"$RULES_FILE"
-
     echo -e "${GREEN}HAProxy configuration updated successfully.${NC}"
 }
 
@@ -194,10 +187,15 @@ restart_haproxy() {
     fi
 }
 
+# Clear screen function
+clear_screen() {
+    sleep 2
+    clear
+}
+
 # Main menu
 install_haproxy
 initialize_files
-
 while true; do
     echo -e "${BLUE}========================================"
     echo -e "           ${CYAN}HAProxy Management${NC}${BLUE}"
@@ -209,7 +207,6 @@ while true; do
     echo -e "   ${RED}0)${NC} Exit"
     echo -e "${BLUE}========================================${NC}"
     read -p "Select an option: " option
-
     case $option in
         1) view_rules ;;
         2) add_rule ;;
