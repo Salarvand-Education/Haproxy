@@ -10,28 +10,46 @@ NC='\033[0m' # No Color
 # Variables
 CONFIG_FILE="/etc/haproxy/haproxy.cfg"
 RULES_FILE="/etc/haproxy/forward_rules.conf"
+LOG_FILE="/var/log/haproxy_manager.log"
+
+# Initialize log file
+initialize_log() {
+    if [[ ! -f "$LOG_FILE" ]]; then
+        touch "$LOG_FILE"
+        echo "[$(date)] - Log file created." >>"$LOG_FILE"
+    fi
+}
+
+# Log a message
+log_message() {
+    local message="$1"
+    echo "[$(date)] - $message" >>"$LOG_FILE"
+    echo -e "${CYAN}[$(date)] - $message${NC}"
+}
 
 # Install HAProxy if not present
 install_haproxy() {
+    clear
     if ! command -v haproxy &>/dev/null; then
-        echo -e "${YELLOW}HAProxy not found. Installing...${NC}"
+        log_message "HAProxy not found. Installing..."
         if apt update && apt install -y haproxy; then
-            echo -e "${GREEN}HAProxy installed successfully.${NC}"
+            log_message "HAProxy installed successfully."
         else
-            echo -e "${RED}Failed to install HAProxy. Exiting...${NC}"
+            log_message "Failed to install HAProxy. Exiting..."
             exit 1
         fi
     else
-        echo -e "${GREEN}HAProxy is already installed.${NC}"
+        log_message "HAProxy is already installed."
     fi
-    clear_screen
+    sleep 2
 }
 
 # Initialize necessary files
 initialize_files() {
+    clear
     # Create config file if it doesn't exist
     if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${YELLOW}Creating $CONFIG_FILE...${NC}"
+        log_message "Creating $CONFIG_FILE..."
         cat >"$CONFIG_FILE" <<EOF
 global
     log /dev/log local0
@@ -60,6 +78,7 @@ EOF
 
 # Display existing rules
 view_rules() {
+    clear
     echo -e "${BLUE}================================================================================"
     printf "%-10s | %-20s | %-30s\n" "Rule No." "Frontend Port" "Backend Address"
     echo -e "--------------------------------------------------------------------------------${NC}"
@@ -80,17 +99,18 @@ view_rules() {
         done
     fi
     echo -e "${BLUE}================================================================================${NC}"
-    sleep 4
-    clear_screen
+    echo -e "${YELLOW}Press Enter to return to the main menu...${NC}"
+    read # Wait for user input before returning to the menu
 }
 
 # Add a new rule
 add_rule() {
+    clear
     read -p "Enter frontend port: " frontend_port
     read -p "Enter backend IP (IPv4, IPv6, or 6to4): " backend_ip
     read -p "Enter backend port: " backend_port
     if [[ -z "$frontend_port" || -z "$backend_ip" || -z "$backend_port" ]]; then
-        echo -e "${RED}All fields are required. Please try again.${NC}"
+        log_message "All fields are required. Please try again."
         return 1
     fi
     # Wrap IPv6 or 6to4 addresses in brackets
@@ -98,9 +118,8 @@ add_rule() {
         backend_ip="[$backend_ip]"
     fi
     echo "$frontend_port:$backend_ip:$backend_port" >>"$RULES_FILE"
-    echo -e "${GREEN}Rule added: Frontend Port $frontend_port -> Backend $backend_ip:$backend_port${NC}"
+    log_message "Rule added: Frontend Port $frontend_port -> Backend $backend_ip:$backend_port"
     restart_haproxy
-    clear_screen
 }
 
 # Delete a rule
@@ -108,30 +127,31 @@ delete_rule() {
     view_rules
     read -p "Enter the rule number to delete: " rule_number
     if [[ ! "$rule_number" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}Invalid rule number. Please enter a valid number.${NC}"
+        log_message "Invalid rule number. Please enter a valid number."
         return 1
     fi
     if sed -i "${rule_number}d" "$RULES_FILE"; then
-        echo -e "${GREEN}Rule deleted successfully.${NC}"
+        log_message "Rule deleted successfully."
         restart_haproxy
     else
-        echo -e "${RED}Failed to delete rule. Check the rule number and try again.${NC}"
+        log_message "Failed to delete rule. Check the rule number and try again."
     fi
-    clear_screen
+    echo -e "${YELLOW}Press Enter to return to the main menu...${NC}"
+    read # Wait for user input before returning to the menu
 }
 
 # Clear all rules
 clear_rules() {
+    clear
     read -p "Are you sure you want to delete ALL rules? (yes/no): " confirm
     if [[ "$confirm" == "yes" ]]; then
         truncate -s 0 "$RULES_FILE"
         generate_config
-        echo -e "${GREEN}All rules have been deleted, and the configuration has been reset.${NC}"
+        log_message "All rules have been deleted, and the configuration has been reset."
         restart_haproxy
     else
-        echo -e "${YELLOW}Operation canceled.${NC}"
+        log_message "Operation canceled."
     fi
-    clear_screen
 }
 
 # Generate HAProxy configuration
@@ -173,30 +193,26 @@ backend backend_$frontend
     server server_$frontend $backend_ip:$backend_port check
 EOF
     done <"$RULES_FILE"
-    echo -e "${GREEN}HAProxy configuration updated successfully.${NC}"
+    log_message "HAProxy configuration updated successfully."
 }
 
 # Restart HAProxy
 restart_haproxy() {
     generate_config
-    echo -e "${YELLOW}Restarting HAProxy...${NC}"
+    log_message "Restarting HAProxy..."
     if systemctl restart haproxy; then
-        echo -e "${GREEN}HAProxy restarted successfully.${NC}"
+        log_message "HAProxy restarted successfully."
     else
-        echo -e "${RED}Failed to restart HAProxy. Check the configuration or run 'systemctl status haproxy' for more details.${NC}"
+        log_message "Failed to restart HAProxy. Check the configuration or run 'systemctl status haproxy' for more details."
     fi
 }
 
-# Clear screen function
-clear_screen() {
-    sleep 2
-    clear
-}
-
 # Main menu
+initialize_log
 install_haproxy
 initialize_files
 while true; do
+    clear
     echo -e "${BLUE}========================================"
     echo -e "           ${CYAN}HAProxy Management${NC}${BLUE}"
     echo -e "========================================${NC}"
@@ -212,9 +228,9 @@ while true; do
         2) add_rule ;;
         3) delete_rule ;;
         4) clear_rules ;;
-        0) 
-            echo -e "${GREEN}Exiting HAProxy management tool. Goodbye!${NC}"
+        0)
+            log_message "Exiting HAProxy management tool. Goodbye!"
             exit 0 ;; # Exit with success code
-        *) echo -e "${RED}Invalid option. Please select a valid option from the menu.${NC}" ;;
+        *) log_message "Invalid option selected." ;;
     esac
 done
